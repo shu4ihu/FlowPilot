@@ -445,7 +445,7 @@
           localCpaStep9Mode: String(targetState.localCpaStep9Mode ?? 'submit').trim() || 'submit',
         };
       }
-      if (flowId === 'openai' && targetId === 'sub2api') {
+      if ((flowId === 'openai' || flowId === 'reauth') && targetId === 'sub2api') {
         return {
           ...targetState,
           sub2apiUrl: String(targetState.sub2apiUrl ?? '').trim(),
@@ -897,6 +897,27 @@
       if (normalized.flows.grok) {
         normalized.flows.grok = normalizeGrokSettings(input, nested, defaults, normalized.flows.grok, normalized.flows.openai);
       }
+      if (normalized.flows.reauth) {
+        const sharedSub2api = resolveSharedSub2ApiCredentials(
+          input,
+          nested,
+          normalized.flows.reauth,
+          normalized.flows.openai
+        );
+        normalized.flows.reauth.targets.sub2api = normalizeFlowTargetState(
+          'reauth',
+          'sub2api',
+          {
+            ...normalized.flows.reauth.targets.sub2api,
+            ...sharedSub2api,
+            sub2apiGroupName: input?.sub2apiGroupName ?? normalized.flows.reauth.targets.sub2api?.sub2apiGroupName,
+            sub2apiGroupNames: input?.sub2apiGroupNames ?? normalized.flows.reauth.targets.sub2api?.sub2apiGroupNames,
+            sub2apiAccountPriority: input?.sub2apiAccountPriority ?? normalized.flows.reauth.targets.sub2api?.sub2apiAccountPriority,
+            sub2apiDefaultProxyName: input?.sub2apiDefaultProxyName ?? normalized.flows.reauth.targets.sub2api?.sub2apiDefaultProxyName,
+          },
+          defaults.flows?.reauth?.targets?.sub2api || {}
+        );
+      }
       return normalized;
     }
 
@@ -970,13 +991,16 @@
       next.vpsUrl = openaiState.targets.cpa?.vpsUrl || '';
       next.vpsPassword = openaiState.targets.cpa?.vpsPassword || '';
       next.localCpaStep9Mode = openaiState.targets.cpa?.localCpaStep9Mode || 'submit';
-      next.sub2apiUrl = openaiState.targets.sub2api?.sub2apiUrl || '';
-      next.sub2apiEmail = openaiState.targets.sub2api?.sub2apiEmail || '';
-      next.sub2apiPassword = openaiState.targets.sub2api?.sub2apiPassword || '';
-      next.sub2apiGroupName = openaiState.targets.sub2api?.sub2apiGroupName || 'codex';
-      next.sub2apiGroupNames = cloneValue(openaiState.targets.sub2api?.sub2apiGroupNames || ['codex', 'openai-plus']);
-      next.sub2apiAccountPriority = openaiState.targets.sub2api?.sub2apiAccountPriority || 1;
-      next.sub2apiDefaultProxyName = openaiState.targets.sub2api?.sub2apiDefaultProxyName || '';
+      const activeSub2apiState = normalizedState.activeFlowId === 'reauth'
+        ? normalizedState.flows.reauth?.targets?.sub2api
+        : openaiState.targets.sub2api;
+      next.sub2apiUrl = activeSub2apiState?.sub2apiUrl || '';
+      next.sub2apiEmail = activeSub2apiState?.sub2apiEmail || '';
+      next.sub2apiPassword = activeSub2apiState?.sub2apiPassword || '';
+      next.sub2apiGroupName = activeSub2apiState?.sub2apiGroupName || 'codex';
+      next.sub2apiGroupNames = cloneValue(activeSub2apiState?.sub2apiGroupNames || ['codex', 'openai-plus']);
+      next.sub2apiAccountPriority = activeSub2apiState?.sub2apiAccountPriority || 1;
+      next.sub2apiDefaultProxyName = activeSub2apiState?.sub2apiDefaultProxyName || '';
       next.codex2apiUrl = openaiState.targets.codex2api?.codex2apiUrl || '';
       next.codex2apiAdminKey = openaiState.targets.codex2api?.codex2apiAdminKey || '';
       next.openaiWebchatUrl = openaiState.targets.webchat?.baseUrl || '';

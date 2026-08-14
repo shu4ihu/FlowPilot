@@ -913,6 +913,119 @@
       };
     }
 
+    async function prepareReauthAccount(state = {}, options = {}) {
+      const groupNames = normalizeSub2ApiGroupNames(state.sub2apiGroupName || DEFAULT_SUB2API_GROUP_NAME);
+      const { origin, token } = await loginSub2Api(state, options);
+      const groups = await getGroupsByNames(origin, token, groupNames, options);
+      const groupId = Number(groups[0]?.id);
+      if (!Number.isSafeInteger(groupId) || groupId <= 0) {
+        throw new Error('SUB2API 目标分组 ID 无效。');
+      }
+
+      const reauthAccountLimit = Math.min(1000, Math.max(1, Math.floor(Number(state.autoRunTotalRuns) || 1)));
+      const query = new URLSearchParams({
+        page: '1',
+        page_size: String(reauthAccountLimit),
+        platform: 'openai',
+        type: 'oauth',
+        status: 'error',
+        group: String(groupId),
+        sort_by: 'last_used_at',
+        sort_order: 'desc',
+        timezone: 'Asia/Shanghai',
+      });
+      const result = await requestJson(origin, `/api/v1/admin/accounts?${query.toString()}`, {
+        method: 'GET',
+        token,
+        timeoutMs: options.timeoutMs,
+      });
+      const accounts = Array.isArray(result?.items) ? result.items : (Array.isArray(result) ? result : []);
+      const excludedAccountIds = new Set(
+        (Array.isArray(state.reauthExcludedAccountIds) ? state.reauthExcludedAccountIds : [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isSafeInteger(id) && id > 0)
+      );
+      const account = accounts.find((item) => {
+        const id = Number(item?.id);
+        return Number.isSafeInteger(id) && id > 0 && !excludedAccountIds.has(id);
+      });
+      const accountId = Number(account?.id);
+      if (!Number.isSafeInteger(accountId) || accountId <= 0) {
+        throw new Error(`分组“${groupNames[0]}”下没有可重新授权的 error 状态 OpenAI 账号。`);
+      }
+
+      const proxyId = normalizeProxyId(account?.proxy_id);
+      const authBody = { redirect_uri: normalizeRedirectUri(options.redirectUri || DEFAULT_REDIRECT_URI) };
+      if (proxyId) authBody.proxy_id = proxyId;
+      let authData;
+      try {
+        authData = await requestJson(origin, '/api/v1/admin/openai/generate-auth-url', {
+          method: 'POST',
+          token,
+          timeoutMs: options.timeoutMs,
+          body: authBody,
+        });
+      } catch (error) {
+        error.reauthAccountId = accountId;
+        error.reauthAccountName = normalizeString(account?.name);
+        throw error;
+      }
+      const oauthUrl = normalizeString(authData?.auth_url || authData?.authUrl);
+      const sessionId = normalizeString(authData?.session_id || authData?.sessionId);
+      const oauthState = normalizeString(authData?.state || extractStateFromAuthUrl(oauthUrl));
+      if (!oauthUrl || !sessionId) {
+        const error = new Error('SUB2API 未返回完整的 reauth auth_url / session_id。');
+        error.reauthAccountId = accountId;
+        error.reauthAccountName = normalizeString(account?.name);
+        throw error;
+      }
+      const reauthAccountName = normalizeString(account?.name);
+      const reauthAccountEmail = normalizeString(
+        account?.extra?.email
+        || account?.credentials?.email
+        || account?.email
+      );
+      if (!reauthAccountEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reauthAccountEmail)) {
+        const error = new Error(`账号 #${accountId}${reauthAccountName ? `（${reauthAccountName}）` : ''} 缺少有效 email，无法进行 OAuth 登录。`);
+        error.reauthAccountId = accountId;
+        error.reauthAccountName = reauthAccountName;
+        throw error;
+      }
+      await logWithOptions(`${options.logLabel || 'Reauth'}：已定位账号 #${accountId}（${reauthAccountEmail}），正在打开重新授权链接...`, 'ok', options);
+      return {
+        oauthUrl,
+        sub2apiSessionId: sessionId,
+        sub2apiOAuthState: oauthState,
+        reauthAccountId: accountId,
+        reauthAccountName,
+        reauthAccountEmail,
+        sub2apiProxyId: proxyId,
+      };
+    }
+
+    async function submitReauthCallback(state = {}, options = {}) {
+      const callback = parseLocalhostCallback(state.localhostUrl || '', options.visibleStep || 6);
+      const accountId = Number(state.reauthAccountId);
+      const sessionId = normalizeString(state.sub2apiSessionId);
+      if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new Error('缺少待重新授权账号 ID，请重新执行第 1 步。');
+      if (!sessionId) throw new Error('缺少 SUB2API session_id，请重新执行第 1 步。');
+      if (state.sub2apiOAuthState && state.sub2apiOAuthState !== callback.state) throw new Error('OAuth 回调 state 与当前 reauth 会话不一致，请重新执行第 1 步。');
+      const { origin, token } = await loginSub2Api(state, options);
+      const exchangeData = await requestJson(origin, '/api/v1/admin/openai/exchange-code', {
+        method: 'POST', token, timeoutMs: options.timeoutMs,
+        body: { session_id: sessionId, code: callback.code, state: callback.state },
+      });
+      const credentials = buildOpenAiCredentials(exchangeData);
+      const extra = buildOpenAiExtra(exchangeData);
+      const updatedAccount = await requestJson(origin, `/api/v1/admin/accounts/${accountId}/apply-oauth-credentials`, {
+        method: 'POST', token, timeoutMs: options.timeoutMs,
+        body: { type: 'oauth', credentials, ...(extra ? { extra } : {}) },
+      });
+      const verifiedStatus = `SUB2API 已完成账号 #${accountId} 重新授权`;
+      await logWithOptions(verifiedStatus, 'ok', options);
+      return { localhostUrl: callback.url, reauthAccount: updatedAccount, verifiedStatus };
+    }
+
     async function submitOpenAiCallback(state = {}, options = {}) {
       const visibleStep = Number(options.visibleStep || state.visibleStep) || 10;
       const callback = parseLocalhostCallback(state.localhostUrl || '', visibleStep);
@@ -1160,6 +1273,8 @@
       extractStateFromAuthUrl,
       generateOpenAiAuthUrl,
       getGroupsByNames,
+      prepareReauthAccount,
+      submitReauthCallback,
       prepareGrokOAuth,
       prepareCodexSessionImport,
       createGrokAccountFromOAuth,

@@ -16,6 +16,10 @@
       id: 'grok',
       path: 'flows/grok/',
     },
+    reauth: {
+      id: 'reauth',
+      path: 'flows/reauth/',
+    },
   });
 
   function normalizeFlowId(value = '') {
@@ -38,12 +42,16 @@
         ? (rootScope.MultiPageOpenAiFlowDefinition || null)
         : (normalized === 'kiro'
           ? (rootScope.MultiPageKiroFlowDefinition || null)
-          : (rootScope.MultiPageGrokFlowDefinition || null)),
+          : (normalized === 'grok'
+            ? (rootScope.MultiPageGrokFlowDefinition || null)
+            : (rootScope.MultiPageReauthFlowDefinition || null))),
       workflow: normalized === 'openai'
         ? (rootScope.MultiPageOpenAiWorkflow || null)
         : (normalized === 'kiro'
           ? (rootScope.MultiPageKiroWorkflow || null)
-          : (rootScope.MultiPageGrokWorkflow || null)),
+          : (normalized === 'grok'
+            ? (rootScope.MultiPageGrokWorkflow || null)
+            : (rootScope.MultiPageReauthWorkflow || null))),
     };
   }
 

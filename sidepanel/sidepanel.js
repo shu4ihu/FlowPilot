@@ -438,6 +438,7 @@ const cfDomainMenu = document.getElementById('cf-domain-menu');
 const inputCfDomain = document.getElementById('input-cf-domain');
 const btnCfDomainMode = document.getElementById('btn-cf-domain-mode');
 const inputRunCount = document.getElementById('input-run-count');
+const inputReauthAccountCount = document.getElementById('input-reauth-account-count');
 const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
 const inputAutoSkipFailuresThreadIntervalMinutes = document.getElementById('input-auto-skip-failures-thread-interval-minutes');
 const inputStep6CookieCleanupEnabled = document.getElementById('input-step6-cookie-cleanup-enabled');
@@ -16132,7 +16133,14 @@ async function startAutoRunFromCurrentSettings() {
   if (customEmailPoolEnabled && lockedRunCount <= 0) {
     throw new Error('请先在邮箱池里至少填写 1 个邮箱。');
   }
-  const totalRuns = lockedRunCount > 0 ? lockedRunCount : requestedTotalRuns;
+  const activeFlowIdForRunCount = typeof getSelectedFlowId === 'function'
+    ? getSelectedFlowId(latestState)
+    : String(latestState?.activeFlowId || latestState?.flowId || DEFAULT_ACTIVE_FLOW_ID).trim().toLowerCase();
+  const reauthAccountCount = Math.min(1000, Math.max(1, parseInt(inputReauthAccountCount?.value, 10) || 1));
+  if (inputReauthAccountCount) inputReauthAccountCount.value = String(reauthAccountCount);
+  const totalRuns = activeFlowIdForRunCount === 'reauth'
+    ? reauthAccountCount
+    : (lockedRunCount > 0 ? lockedRunCount : requestedTotalRuns);
   registerPendingAutoRunStartRunCount(totalRuns);
   if (lockedRunCount > 0) {
     inputRunCount.value = String(lockedRunCount);
@@ -17582,6 +17590,10 @@ inputInbucketHost.addEventListener('input', () => {
 });
 inputInbucketHost.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
+});
+
+inputReauthAccountCount?.addEventListener('blur', () => {
+  inputReauthAccountCount.value = String(Math.min(1000, Math.max(1, parseInt(inputReauthAccountCount.value, 10) || 1)));
 });
 
 inputRunCount.addEventListener('input', () => {

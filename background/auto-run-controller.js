@@ -75,6 +75,38 @@
     });
     const DONE_NODE_STATUSES = new Set(['completed', 'manual_completed', 'skipped']);
 
+    function isReauthFlow(state = {}) {
+      return String(state?.activeFlowId || state?.flowId || '').trim().toLowerCase() === 'reauth';
+    }
+
+    function classifyReauthError(error) {
+      const message = getErrorMessage(error);
+      if (/没有可重新授权的 error 状态 OpenAI 账号/.test(message)) return 'empty';
+      if (/尚未配置 SUB2API|SUB2API URL|登录邮箱|登录密码|未找到以下 openai 分组|目标分组 ID 无效|401|403|unauthorized|forbidden/i.test(message)) return 'config';
+      if (/超时|timeout|网络|network|fetch|5\d\d|temporar|连接|加载|transport/i.test(message)) return 'transient';
+      return 'account';
+    }
+
+    async function recordReauthFailure(state = {}, reason = '', category = 'account', attemptRun = 1, error = null) {
+      const accountId = Number(state?.reauthAccountId || error?.reauthAccountId);
+      const accountName = String(state?.reauthAccountName || error?.reauthAccountName || state?.reauthAccountEmail || state?.email || '').trim();
+      const accountLabel = Number.isSafeInteger(accountId) && accountId > 0
+        ? `#${accountId}${accountName ? `（${accountName}）` : ''}`
+        : (accountName || '未定位账号');
+      await setState({
+        reauthLastError: {
+          accountId: Number.isSafeInteger(accountId) && accountId > 0 ? accountId : null,
+          accountName,
+          attemptRun,
+          category,
+          message: reason,
+          occurredAt: Date.now(),
+        },
+      });
+      await addLog(`Reauth 账号 ${accountLabel} 执行失败（${category}）：${reason}`, 'error');
+      return accountLabel;
+    }
+
     function buildFreshAttemptIdentityResetPatch() {
       return {
         currentPhoneActivation: null,
@@ -644,6 +676,14 @@
         : 1;
       let continueCurrentOnFirstAttempt = initialMode === 'continue';
       let forceFreshTabsNextRun = false;
+      const persistedReauthExcludedAccountIds = sessionId === Number(options.autoRunSessionId)
+        ? (await getState())?.reauthExcludedAccountIds
+        : [];
+      const reauthExcludedAccountIds = new Set(
+        (Array.isArray(persistedReauthExcludedAccountIds) ? persistedReauthExcludedAccountIds : [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isSafeInteger(id) && id > 0)
+      );
       let stoppedEarly = false;
       let parkedByTimer = false;
       const roundSummaries = buildAutoRunRoundSummaries(totalRuns, options.resumeRoundSummaries);
@@ -686,9 +726,12 @@
         let reuseExistingProgress = resumingCurrentRound;
         const currentRoundState = await getState();
         const keepSameEmailUntilAddPhone = autoRunSkipFailures && shouldKeepCustomMailProviderPoolEmail(currentRoundState);
-        const maxAttemptsForRound = autoRunSkipFailures
-          ? (keepSameEmailUntilAddPhone ? Number.MAX_SAFE_INTEGER : AUTO_RUN_MAX_RETRIES_PER_ROUND + 1)
-          : Math.max(1, attemptRun);
+        const reauthRound = isReauthFlow(currentRoundState);
+        const maxAttemptsForRound = reauthRound
+          ? 2
+          : (autoRunSkipFailures
+            ? (keepSameEmailUntilAddPhone ? Number.MAX_SAFE_INTEGER : AUTO_RUN_MAX_RETRIES_PER_ROUND + 1)
+            : Math.max(1, attemptRun));
 
         while (attemptRun <= maxAttemptsForRound) {
           runtime.set({
@@ -733,6 +776,7 @@
               nodeStatuses: buildFreshAttemptNodeStatuses(prevState),
               autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
               autoRunSessionId: sessionId,
+              reauthExcludedAccountIds: Array.from(reauthExcludedAccountIds),
               tabRegistry: {},
               sourceLastUrls: {},
               ...getAutoRunStatusPayload('running', { currentRun: targetRun, totalRuns, attemptRun, sessionId }),
@@ -822,7 +866,14 @@
             }
 
             const reason = getErrorMessage(err);
-            roundSummary.failureReasons.push(reason);
+            const failureState = await getState();
+            const reauthFailure = isReauthFlow(failureState);
+            const reauthErrorCategory = reauthFailure ? classifyReauthError(err) : '';
+            const reauthAccountLabel = reauthFailure
+              ? await recordReauthFailure(failureState, reason, reauthErrorCategory, attemptRun, err)
+              : '';
+            const recordedReason = reauthFailure ? `账号 ${reauthAccountLabel}：${reason}` : reason;
+            roundSummary.failureReasons.push(recordedReason);
             const blockedByPhoneSmsRateLimit = typeof isPhoneSmsPlatformRateLimitFailure === 'function'
               && isPhoneSmsPlatformRateLimitFailure(err);
             const blockedByPhoneNoSupply = !blockedByPhoneSmsRateLimit
@@ -842,15 +893,17 @@
               && isKiroProxyFailure(err);
             const blockedByDuckDdgDailyLimit = typeof isDuckDdgDailyLimitFailure === 'function'
               && isDuckDdgDailyLimitFailure(err);
-            const canRetry = !blockedByAddPhone
-              && !blockedByPhoneNoSupply
-              && !blockedByPlusNonFreeTrial
-              && !blockedBySignupUserAlreadyExists
-              && !blockedByStep4Route405
-              && !blockedByKiroProxy
-              && !blockedByDuckDdgDailyLimit
-              && autoRunSkipFailures
-              && attemptRun < maxAttemptsForRound;
+            const canRetry = reauthFailure
+              ? !['config', 'empty'].includes(reauthErrorCategory) && attemptRun < maxAttemptsForRound
+              : (!blockedByAddPhone
+                && !blockedByPhoneNoSupply
+                && !blockedByPlusNonFreeTrial
+                && !blockedBySignupUserAlreadyExists
+                && !blockedByStep4Route405
+                && !blockedByKiroProxy
+                && !blockedByDuckDdgDailyLimit
+                && autoRunSkipFailures
+                && attemptRun < maxAttemptsForRound);
 
             await setState({
               autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
@@ -1089,6 +1142,15 @@
                 sessionId,
               });
               forceFreshTabsNextRun = true;
+              await setState({
+                reauthAccountId: null,
+                reauthAccountName: null,
+                reauthAccountEmail: null,
+                oauthUrl: null,
+                sub2apiSessionId: null,
+                sub2apiOAuthState: null,
+                localhostUrl: null,
+              });
               await addLog(
                 keepSameEmailUntilAddPhone
                   ? `自动重试：${Math.round(AUTO_RUN_RETRY_DELAY_MS / 1000)} 秒后继续使用当前邮箱，开始第 ${targetRun}/${totalRuns} 轮第 ${attemptRun + 1} 次尝试。`
@@ -1146,7 +1208,46 @@
             await setState({
               autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
             });
-            await appendRoundRecord('failed', reason, err);
+            await appendRoundRecord('failed', recordedReason, err);
+            if (reauthFailure) {
+              const failedReauthAccountId = Number(failureState?.reauthAccountId || err?.reauthAccountId);
+              if (Number.isSafeInteger(failedReauthAccountId) && failedReauthAccountId > 0) {
+                reauthExcludedAccountIds.add(failedReauthAccountId);
+                await setState({
+                  reauthExcludedAccountIds: Array.from(reauthExcludedAccountIds),
+                });
+              }
+              cancelPendingCommands('当前 Reauth 账号已失败并跳过。');
+              await broadcastStopToContentScripts();
+              forceFreshTabsNextRun = true;
+              if (reauthErrorCategory === 'config') {
+                await addLog('Reauth 配置错误，当前自动运行将停止。', 'warn');
+                stoppedEarly = true;
+                await broadcastAutoRunStatus('stopped', {
+                  currentRun: targetRun,
+                  totalRuns,
+                  attemptRun,
+                  sessionId: 0,
+                });
+              } else if (reauthErrorCategory === 'empty') {
+                await addLog('Reauth 已没有符合条件的错误账号，本次自动运行正常提前结束。', 'warn');
+                stoppedEarly = true;
+                await broadcastAutoRunStatus('stopped', {
+                  currentRun: targetRun,
+                  totalRuns,
+                  attemptRun,
+                  sessionId: 0,
+                });
+              } else {
+                await addLog(
+                  targetRun < totalRuns
+                    ? `Reauth 账号 ${reauthAccountLabel} 重试一次后仍失败，已记录错误并继续下一个账号。`
+                    : `Reauth 账号 ${reauthAccountLabel} 重试一次后仍失败，已记录错误，本次自动运行结束。`,
+                  'warn'
+                );
+              }
+              break;
+            }
             if (!autoRunSkipFailures) {
               cancelPendingCommands('当前轮执行失败。');
               await broadcastStopToContentScripts();

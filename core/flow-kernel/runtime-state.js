@@ -38,6 +38,10 @@
         'sub2apiDraftName',
         'sub2apiProxyId',
         'sub2apiGroupIds',
+        'reauthAccountId',
+        'reauthAccountName',
+        'reauthAccountEmail',
+        'reauthExcludedAccountIds',
         'codex2apiSessionId',
         'codex2apiOAuthState',
       ]),
@@ -88,8 +92,10 @@
         'step8VerificationTargetEmail',
       ]),
     });
+    const REAUTH_FLOW_FIELD_GROUPS = OPENAI_FLOW_FIELD_GROUPS;
     const FLOW_FIELD_GROUPS = Object.freeze({
       openai: OPENAI_FLOW_FIELD_GROUPS,
+      reauth: REAUTH_FLOW_FIELD_GROUPS,
     });
 
     function isPlainObject(value) {
@@ -221,6 +227,7 @@
       return {
         ...baseFlowState,
         openai: buildScopedFlowState(baseFlowState, state, 'openai'),
+        reauth: buildScopedFlowState(baseFlowState, state, 'reauth'),
       };
     }
 

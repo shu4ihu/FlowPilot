@@ -110,6 +110,7 @@
           <option value="openai" selected>Codex / OpenAI</option>
           <option value="kiro">Kiro</option>
           <option value="grok">Grok</option>
+          <option value="reauth">Reauth</option>
         </select>
       </div>
       <div class="data-row" id="row-source-selector">
@@ -729,6 +730,10 @@
             <select id="input-step-execution-range-to" class="data-select step-range-input" title="允许执行的结束节点"></select>
           </div>
         </div>
+      </div>
+      <div class="data-row" id="row-reauth-account-count" style="display:none;">
+        <span class="data-label">重新授权数量</span>
+        <input type="number" id="input-reauth-account-count" class="data-input auto-delay-input" value="1" min="1" max="1000" step="1" title="自动运行时连续处理的错误账号数量" />
       </div>
       <div class="data-row module-divider-start" id="row-oauth-display">
         <span class="data-label">OAuth</span>
@@ -2010,6 +2015,8 @@
   <script src="../flows/kiro/workflow.js"></script>
   <script src="../flows/grok/index.js"></script>
   <script src="../flows/grok/workflow.js"></script>
+  <script src="../flows/reauth/index.js"></script>
+  <script src="../flows/reauth/workflow.js"></script>
   <script src="../flows/index.js"></script>
   <script src="../core/flow-kernel/flow-registry.js"></script>
   <script src="../shared/contribution-registry.js"></script>

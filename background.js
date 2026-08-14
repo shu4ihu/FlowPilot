@@ -8,6 +8,8 @@ importScripts(
   'flows/kiro/workflow.js',
   'flows/grok/index.js',
   'flows/grok/workflow.js',
+  'flows/reauth/index.js',
+  'flows/reauth/workflow.js',
   'flows/index.js',
   'core/flow-kernel/flow-registry.js',
   'shared/contribution-registry.js',
@@ -10790,6 +10792,8 @@ async function handleStepData(step, payload) {
   switch (step) {
     case 1: {
       const updates = {};
+      if (payload.reauthAccountId !== undefined) updates.reauthAccountId = payload.reauthAccountId || null;
+      if (payload.reauthAccountName !== undefined) updates.reauthAccountName = payload.reauthAccountName || null;
       if (payload.oauthUrl) {
         updates.oauthUrl = payload.oauthUrl;
         broadcastDataUpdate({ oauthUrl: payload.oauthUrl });
@@ -13504,6 +13508,7 @@ const mailRuleRegistry = self.MultiPageBackgroundMailRuleRegistry?.createMailRul
     openai: openAiMailRules,
     kiro: kiroMailRules,
     grok: grokMailRules,
+    reauth: openAiMailRules,
   },
 });
 const flowMailPollingService = self.MultiPageBackgroundFlowMailPolling?.createFlowMailPollingService({
@@ -14093,6 +14098,60 @@ function resolveBoundEmailForReloginState(state = {}) {
   ).trim();
 }
 
+async function executeReauthPrepareAccount(state = {}) {
+  const api = self.MultiPageBackgroundSub2ApiApi?.createSub2ApiApi?.({
+    addLog,
+    normalizeSub2ApiUrl,
+    DEFAULT_SUB2API_GROUP_NAME,
+  });
+  if (!api?.prepareReauthAccount) {
+    throw new Error('SUB2API reauth 接口模块未加载。');
+  }
+  const result = await api.prepareReauthAccount(state, {
+    logLabel: 'Reauth',
+    timeoutMs: SUB2API_STEP1_RESPONSE_TIMEOUT_MS,
+  });
+  await setState({
+    oauthUrl: result.oauthUrl || null,
+    sub2apiSessionId: result.sub2apiSessionId || null,
+    sub2apiOAuthState: result.sub2apiOAuthState || null,
+    sub2apiProxyId: result.sub2apiProxyId || null,
+    reauthAccountId: result.reauthAccountId || null,
+    reauthAccountName: result.reauthAccountName || null,
+    reauthAccountEmail: result.reauthAccountEmail || null,
+    email: result.reauthAccountEmail || null,
+    accountIdentifierType: result.reauthAccountEmail ? 'email' : null,
+    accountIdentifier: result.reauthAccountEmail || null,
+  });
+  await completeNodeFromBackground(state?.nodeId || 'reauth-prepare-account', result);
+  return result;
+}
+
+async function executeReauthPlatformVerify(state = {}) {
+  const latestState = await getState();
+  const effectiveState = {
+    ...state,
+    ...latestState,
+    reauthAccountId: state?.reauthAccountId ?? latestState?.reauthAccountId,
+    reauthAccountName: state?.reauthAccountName ?? latestState?.reauthAccountName,
+  };
+  const api = self.MultiPageBackgroundSub2ApiApi?.createSub2ApiApi?.({
+    addLog,
+    normalizeSub2ApiUrl,
+    DEFAULT_SUB2API_GROUP_NAME,
+  });
+  if (!api?.submitReauthCallback) {
+    throw new Error('SUB2API reauth 接口模块未加载。');
+  }
+  const result = await api.submitReauthCallback(effectiveState, {
+    visibleStep: 5,
+    logLabel: 'Reauth',
+    timeoutMs: SUB2API_STEP9_RESPONSE_TIMEOUT_MS,
+  });
+  await completeNodeFromBackground(state?.nodeId || 'platform-verify', result);
+  return result;
+}
+
 async function executeReloginBoundEmail(state = {}) {
   const visibleStep = Math.floor(Number(state?.visibleStep) || 0) || 10;
   const boundEmail = resolveBoundEmailForReloginState(state);
@@ -14137,7 +14196,20 @@ const stepExecutorsByKey = {
   'cpa-session-import': (state) => cpaSessionImportExecutor.executeCpaSessionImport(state),
   'openai-upload-session-to-webchat': (state) => openAiWebchatPublisher.executeOpenAiUploadSessionToWebchat(state),
   'openai-upload-session-to-chatgpt2api': (state) => openAiChatgpt2ApiPublisher.executeOpenAiUploadSessionToChatgpt2Api(state),
-  'oauth-login': (state) => step7Executor.executeStep7(state),
+  'reauth-prepare-account': (state) => executeReauthPrepareAccount(state),
+  'oauth-login': (state) => String(state?.activeFlowId || state?.flowId || '').trim().toLowerCase() === 'reauth'
+    ? step7Executor.executeStep7({
+      ...state,
+      forceLoginIdentifierType: 'email',
+      forceEmailLogin: false,
+      accountIdentifierType: 'email',
+      accountIdentifier: state?.reauthAccountEmail || state?.email || '',
+      email: state?.reauthAccountEmail || state?.email || '',
+      password: '',
+      resolvedSignupMethod: 'email',
+      signupMethod: 'email',
+    })
+    : step7Executor.executeStep7(state),
   'fetch-login-code': (state) => step8Executor.executeStep8(state),
   'post-login-phone-verification': (state) => step8Executor.executePostLoginPhoneVerification(state),
   'bind-email': (state) => step8Executor.executeBindEmail(state),
@@ -14146,7 +14218,9 @@ const stepExecutorsByKey = {
   'fetch-bound-email-login-code': (state) => step8Executor.executeBoundEmailLoginCode(state),
   'post-bound-email-phone-verification': (state) => step8Executor.executeBoundEmailPostLoginPhoneVerification(state),
   'confirm-oauth': (state) => step9Executor.executeStep9(state),
-  'platform-verify': (state) => executeStep10(state),
+  'platform-verify': (state) => String(state?.activeFlowId || state?.flowId || '').trim().toLowerCase() === 'reauth'
+    ? executeReauthPlatformVerify(state)
+    : executeStep10(state),
   'kiro-open-register-page': (state) => kiroRegisterRunner.executeKiroOpenRegisterPage(state),
   'kiro-submit-email': (state) => kiroRegisterRunner.executeKiroSubmitEmail(state),
   'kiro-submit-name': (state) => kiroRegisterRunner.executeKiroSubmitName(state),
@@ -14626,6 +14700,17 @@ async function executeStep5(state) {
 
 async function refreshOAuthUrlBeforeStep6(state, options = {}) {
   const visibleStep = Number(options.visibleStep) || Number(state?.visibleStep) || 7;
+  if (String(state?.activeFlowId || state?.flowId || '').trim().toLowerCase() === 'reauth') {
+    const oauthUrl = String(state?.oauthUrl || '').trim();
+    if (!oauthUrl) {
+      throw new Error('Reauth 尚未获取 OAuth 地址，请先执行第 1 步。');
+    }
+    await addLog('正在打开已定位账号的 OAuth 重新授权链接...', 'info', {
+      step: visibleStep,
+      stepKey: 'oauth-login',
+    });
+    return oauthUrl;
+  }
   if (state?.accountContributionExpected && !state?.accountContributionEnabled) {
     throw new Error(`步骤 ${visibleStep}：当前自动流程预期使用账号贡献，但运行态 accountContributionEnabled 已丢失，已阻止回退到普通 CPA / SUB2API / Codex2API 链路。请重新进入账号贡献后再点击自动。`);
   }
