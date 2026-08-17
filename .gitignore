@@ -16,3 +16,5 @@ __pycache__/
 .worktrees/
 # Local exported runtime settings
 /config.json
+
+autoRun.log
